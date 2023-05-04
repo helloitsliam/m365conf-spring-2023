@@ -1,0 +1,166 @@
+############################ 
+# Unusual Signin Locations #
+############################
+let typicalLocations = dynamic(["US","CA","GB"]);
+let timeframe = ago(90d);
+AADSignInEventsBeta
+| where Timestamp > timeframe
+| where ErrorCode == 0
+| extend Location = tostring(Country)
+| where Location != "" and not(Location in (typicalLocations))
+| summarize UnusualSignInCount = count() by Location, AccountDisplayName, Timestamp
+| order by Location desc
+
+
+
+####################################    
+# Get Account Logins by IP Address #
+####################################
+let threshold = 0;
+let timeRange = 30d;
+AADSignInEventsBeta
+| where Timestamp > ago(timeRange)
+| summarize LoginCount = count() by IPAddress, Date = bin(Timestamp, 1d), AccountUpn
+| where LoginCount > threshold
+| sort by Date, LoginCount desc
+
+
+
+##############################
+# Searching User Error Codes #
+##############################
+AADSignInEventsBeta
+| where Timestamp > ago(30d)
+| where ErrorCode != 0
+| where AccountUpn == "nestorw@msdx878906.onmicrosoft.com"
+| summarize UnusualSignInCount = count() by ErrorCode, AccountUpn, Country
+
+
+
+##########################    
+# Failed Signin Attempts #
+##########################
+IdentityLogonEvents
+| where Timestamp > ago(30d)
+| where ActionType == "LogonFailed"
+| join kind=inner IdentityInfo on AccountUpn
+| project Timestamp, AccountUpn, AccountDisplayName, DeviceName, ActionType, LogonType, FailureReason
+| order by Timestamp desc
+
+
+
+###########################################
+# Password Reset Events  - Sentinel Query #
+###########################################
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == "Change user password"
+| extend InitiatedByJson = parse_json(InitiatedBy)
+| project TimeGenerated, User = tostring(InitiatedByJson.user.userPrincipalName), OperationName, Category
+| order by TimeGenerated desc
+
+
+
+####################################
+# Conditional Access Policy Bypass #
+####################################
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where ConditionalAccessStatus == "notApplied"
+| extend AuthenticationDetailsParsed = parse_json(AuthenticationDetails)
+| extend AuthenticationStepDateTime = AuthenticationDetailsParsed[0].authenticationStepDateTime
+| extend AuthenticationMethod = AuthenticationDetailsParsed[0].authenticationMethod
+| extend Succeeded = AuthenticationDetailsParsed[0].succeeded
+| project TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName, 
+ConditionalAccessStatus, AuthenticationStepDateTime, AuthenticationMethod, Succeeded
+| order by TimeGenerated desc
+
+
+
+############################################
+# Creation of App Registrations - Sentinel #
+############################################
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == "Add service principal"
+| extend initiatedBy = parse_json(InitiatedBy)
+| extend createdBy = tostring(initiatedBy.user.userPrincipalName)
+| project TimeGenerated, Identity, OperationName, createdBy, parse_json(TargetResources)
+| order by TimeGenerated desc
+
+
+
+####################################################################
+# API Permissions and App Consent for App Registrations - Sentinel #
+####################################################################
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in ("Consent to application", "Add delegated permission grant", "Add app role assignment to service principal")
+| extend initiatedBy = parse_json(InitiatedBy)
+| extend createdBy = tostring(initiatedBy.user.userPrincipalName)
+| extend targetResources = parse_json(TargetResources)
+| extend targetDisplayName = tostring(targetResources[0].displayName)
+| extend permission = tostring(targetResources[0].modifiedProperties[0].newValue)
+| project TimeGenerated, OperationName, createdBy, targetDisplayName, permission
+| order by TimeGenerated desc
+
+
+
+#################################################
+# Get Added Mailbox Forwarding Rules - Sentinel #
+#################################################
+OfficeActivity
+| where OfficeWorkload == 'Exchange'
+| where TimeGenerated > ago(30d)
+| mv-expand Properties = parse_json(Parameters)
+| where Properties.Name == "ForwardingSmtpAddress" or Properties.Name == "DeliverToMailboxAndForward"
+| project TimeGenerated, Operation, UserId, Properties.Name, Properties.Value
+| order by TimeGenerated desc
+
+ 
+
+#######################################################
+# Get Mass Deleted Files within SharePoint - Sentinel #
+#######################################################
+let threshold = 10;
+let time_window = 5m;
+OfficeActivity
+| where TimeGenerated > ago(1d)
+| where OfficeWorkload == 'SharePoint'
+| where Operation == 'FileRecycled' or Operation == "FileDeletedFirstStageRecycleBin" or Operation == "FileDeletedSecondStageRecycleBin"
+| summarize file_delete_count = count() by UserId, bin(TimeGenerated, time_window), Operation
+| where file_delete_count > threshold
+| order by TimeGenerated desc
+
+
+
+###################################################
+# Exchange Admin Grants Mailbox Access - Sentinel #
+###################################################
+OfficeActivity
+| where RecordType == "ExchangeAdmin"
+| where Operation == "Add-MailboxPermission"
+| parse-where Parameters with * 'Identity","Value":"' TargetMailbox '"' *
+| parse-where Parameters with * 'User","Value":"' UserGivenAccess '"' *
+| parse-where Parameters with * 'AccessRights","Value":"' AccessRights '"' *
+| project
+    TimeGenerated,
+    Actor=UserId,
+    ['Target Mailbox']=TargetMailbox,
+    ['Target Mailbox DisplayName']=OfficeObjectId,
+    ['User Granted Access']=UserGivenAccess,
+    ['Access Type']=AccessRights
+| where Actor != "NT AUTHORITY\\SYSTEM (Microsoft.Exchange.Servicehost)"
+| sort by TimeGenerated desc 
+
+
+
+###################################################################
+# Get Events where Accessed Application is PowerShell  - Sentinel #
+###################################################################
+SigninLogs
+| where AppDisplayName in~ ("Azure Active Directory PowerShell",
+        "Microsoft Graph PowerShell",
+        "Microsoft Azure PowerShell") or UserAgent contains "WindowsPowerShell"
+| project TimeGenerated, AppDisplayName, UserPrincipalName, IPAddress, UserAgent
+
